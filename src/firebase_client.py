@@ -8,30 +8,37 @@ db = None
 
 def initialize_firebase():
     """
-    Initializes the Firebase client using credentials.
-    Tries to load from a secret file on Render, falls back to a local file.
+    Initializes the Firebase client.
+    This new method is more robust and works both on Render and locally.
     """
     global db
     try:
-        # This path is automatically set by Render for secret files
-        creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        # Naya, behtar tareeka:
+        # Yeh line automatically Render par 'google_credentials.json' dhoondh legi.
+        # Agar woh nahi milta, to yeh error dega aur hum local file try karenge.
+        cred = credentials.ApplicationDefault()
+        print("Initializing Firebase using Application Default Credentials (for Render)...")
+        # Project ID environment variable se aayega
+        project_id = os.environ.get('FIREBASE_PROJECT_ID')
+        firebase_admin.initialize_app(cred, {
+            'projectId': project_id, 
+        })
         
-        if creds_path:
-            # Running on Render
-            cred = credentials.Certificate(creds_path)
-            print("Initializing Firebase from Render secret file...")
-        else:
-            # Running locally, fallback to the local key file
-            local_path = 'serviceAccountKey.json' # Or your local key file name
-            cred = credentials.Certificate(local_path)
-            print(f"Initializing Firebase from local file: {local_path}...")
-
-        firebase_admin.initialize_app(cred)
-        db = firestore.client()
-        print("Firebase initialized successfully.")
     except Exception as e:
-        print(f"Error initializing Firebase: {e}")
-        raise
+        print(f"Could not use Application Default Credentials ({e}). Falling back to local key file...")
+        try:
+            # Local computer ke liye fallback
+            local_path = 'serviceAccountKey.json'
+            cred = credentials.Certificate(local_path)
+            firebase_admin.initialize_app(cred)
+            print(f"Initializing Firebase from local file: {local_path}...")
+        except Exception as local_e:
+            print(f"FATAL: Error initializing Firebase from both sources: {local_e}")
+            raise local_e
+
+    db = firestore.client()
+    print("Firebase initialized successfully.")
+
 
 def get_patient_appointments_by_id(patient_id):
     """Fetches all appointments for a given patient ID."""
@@ -51,46 +58,28 @@ def get_doctor_name(staff_id):
     return "a doctor"
 
 def find_doctor_by_specialty(specialty):
-    """
-    Finds an available doctor matching a given specialty.
-    **THIS IS THE CORRECTED FUNCTION.**
-    """
-    if not db or not specialty:
-        return None, None
-    
+    """Finds an available doctor matching a given specialty."""
+    if not db or not specialty: return None, None
     try:
         staffs_ref = db.collection('staffs').where('role', '==', 'Doctor').stream()
         doctors_list = [doc.to_dict() for doc in staffs_ref]
-        
         if not doctors_list:
-            print("No doctors found in the 'staffs' collection.")
+            print("No doctors found in 'staffs' collection.")
             return None, None
-            
         doctors_df = pd.DataFrame(doctors_list)
-        
-        # --- FIX APPLIED HERE ---
-        # Instead of a confusing 'if' statement, we filter the DataFrame.
-        # We also convert both to lowercase to avoid case-sensitivity issues ('cardiology' vs 'Cardiology').
         matching_doctors = doctors_df[doctors_df['specialization'].str.lower() == specialty.lower()]
-
-        # Now, we check if the filtered list is empty or not.
         if not matching_doctors.empty:
-            # If we found one or more doctors, select the first one.
             doctor = matching_doctors.iloc[0]
-            doctor_id = doctor.get('staffId') # Use staffId from the DataFrame
+            doctor_id = doctor.get('staffId')
             doctor_name = doctor.get('name')
             print(f"Found matching doctor: {doctor_name} for specialty: {specialty}")
             return doctor_id, doctor_name
         else:
-            # If no doctor with that specialty is found.
             print(f"No doctor found for specialty: {specialty}")
             return None, None
-        # --- END OF FIX ---
-
     except Exception as e:
         print(f"An error occurred in find_doctor_by_specialty: {e}")
         return None, None
-
 
 def create_pending_approval(patient_id, doctor_id, symptoms, ai_output):
     """Creates a record in the 'pendingApprovals' collection."""
@@ -109,3 +98,4 @@ def create_pending_approval(patient_id, doctor_id, symptoms, ai_output):
     except Exception as e:
         print(f"Error creating pending approval: {e}")
         return None
+
