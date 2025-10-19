@@ -1,130 +1,111 @@
-
 import os
 import firebase_admin
 from firebase_admin import credentials, firestore
-from dotenv import load_dotenv
+import pandas as pd
 
+# Global variable for the database client
 db = None
 
 def initialize_firebase():
     """
-    Initializes the Firebase Admin SDK. Skips initialization if already done.
+    Initializes the Firebase client using credentials.
+    Tries to load from a secret file on Render, falls back to a local file.
     """
     global db
-    if not firebase_admin._apps:
-        load_dotenv()
-        service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    try:
+        # This path is automatically set by Render for secret files
+        creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
         
-        if not service_account_path:
-            raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON path not found in .env file.")
-            
-        if not os.path.exists(service_account_path):
-            raise FileNotFoundError(f"Firebase service account key not found at path: {service_account_path}")
+        if creds_path:
+            # Running on Render
+            cred = credentials.Certificate(creds_path)
+            print("Initializing Firebase from Render secret file...")
+        else:
+            # Running locally, fallback to the local key file
+            local_path = 'serviceAccountKey.json' # Or your local key file name
+            cred = credentials.Certificate(local_path)
+            print(f"Initializing Firebase from local file: {local_path}...")
 
-        cred = credentials.Certificate(service_account_path)
         firebase_admin.initialize_app(cred)
+        db = firestore.client()
         print("Firebase initialized successfully.")
-    db = firestore.client()
+    except Exception as e:
+        print(f"Error initializing Firebase: {e}")
+        raise
+
+def get_patient_appointments_by_id(patient_id):
+    """Fetches all appointments for a given patient ID."""
+    if not db: return []
+    appointments_ref = db.collection('appointments').where('patientId', '==', patient_id).stream()
+    return [appointment.to_dict() for appointment in appointments_ref]
+
+def get_doctor_name(staff_id):
+    """Fetches a doctor's name using their staff ID."""
+    if not db: return "a doctor"
+    try:
+        doc_ref = db.collection('staffs').document(staff_id).get()
+        if doc_ref.exists:
+            return doc_ref.to_dict().get('name', "a doctor")
+    except Exception as e:
+        print(f"Error fetching doctor name: {e}")
+    return "a doctor"
 
 def find_doctor_by_specialty(specialty):
     """
-    Finds a doctor in the 'users' collection with a given specialty.
-    Returns the doctor's ID and fullname.
+    Finds an available doctor matching a given specialty.
+    **THIS IS THE CORRECTED FUNCTION.**
     """
-    if not specialty or not db:
+    if not db or not specialty:
         return None, None
     
     try:
-        # Query the 'users' collection for a doctor with the given specialization
-        users_ref = db.collection('users')
-        # Assuming doctors are identified by a role or some other field.
-        # For now, we will just search for the specialization.
-        query = users_ref.where('specialization', '==', specialty).limit(1)
-        docs = query.stream()
-
-        for doc in docs:
-            # Return the first doctor found
-            return doc.id, doc.to_dict().get("fullname")
+        staffs_ref = db.collection('staffs').where('role', '==', 'Doctor').stream()
+        doctors_list = [doc.to_dict() for doc in staffs_ref]
         
-        return None, None # No doctor found for the specialty
+        if not doctors_list:
+            print("No doctors found in the 'staffs' collection.")
+            return None, None
+            
+        doctors_df = pd.DataFrame(doctors_list)
+        
+        # --- FIX APPLIED HERE ---
+        # Instead of a confusing 'if' statement, we filter the DataFrame.
+        # We also convert both to lowercase to avoid case-sensitivity issues ('cardiology' vs 'Cardiology').
+        matching_doctors = doctors_df[doctors_df['specialization'].str.lower() == specialty.lower()]
+
+        # Now, we check if the filtered list is empty or not.
+        if not matching_doctors.empty:
+            # If we found one or more doctors, select the first one.
+            doctor = matching_doctors.iloc[0]
+            doctor_id = doctor.get('staffId') # Use staffId from the DataFrame
+            doctor_name = doctor.get('name')
+            print(f"Found matching doctor: {doctor_name} for specialty: {specialty}")
+            return doctor_id, doctor_name
+        else:
+            # If no doctor with that specialty is found.
+            print(f"No doctor found for specialty: {specialty}")
+            return None, None
+        # --- END OF FIX ---
+
     except Exception as e:
-        print(f"An error occurred while finding a doctor: {e}")
+        print(f"An error occurred in find_doctor_by_specialty: {e}")
         return None, None
+
 
 def create_pending_approval(patient_id, doctor_id, symptoms, ai_output):
-    """
-    Creates a new record in the 'pending_approval' collection.
-    """
-    if not db:
-        return None
-    
+    """Creates a record in the 'pendingApprovals' collection."""
+    if not db: return None
     try:
-        approval_ref = db.collection('pending_approval').document()
-        approval_data = {
+        doc_ref = db.collection('pendingApprovals').add({
             'patientId': patient_id,
-            'doctorId': doctor_id,
+            'staffId': doctor_id,
             'symptoms': symptoms,
             'aiOutput': ai_output,
-            'status': 'pending',
+            'status': 'Pending',
             'timestamp': firestore.SERVER_TIMESTAMP
-        }
-        approval_ref.set(approval_data)
-        print(f"Successfully created pending approval record: {approval_ref.id}")
-        return approval_ref.id
+        })
+        print(f"Successfully created pending approval record: {doc_ref[1].id}")
+        return doc_ref[1].id
     except Exception as e:
-        print(f"An error occurred while creating pending approval: {e}")
+        print(f"Error creating pending approval: {e}")
         return None
-
-def get_doctor_name(staff_id):
-    """
-    Finds the doctor's name using a 3-step lookup from the staffId.
-    """
-    # [This function remains unchanged]
-    if not staff_id or not db:
-        return None
-
-    try:
-        staff_ref = db.collection('staff').document(staff_id)
-        staff_doc = staff_ref.get()
-        if not staff_doc.exists:
-            return None
-
-        staff_data = staff_doc.to_dict()
-        doctor_id = staff_data.get('assignedDoctorId')
-        if not doctor_id:
-            return None
-
-        doctor_ref = db.collection('users').document(doctor_id)
-        doctor_doc = doctor_ref.get()
-        if not doctor_doc.exists:
-            return None
-
-        doctor_data = doctor_doc.to_dict()
-        return doctor_data.get('fullname')
-
-    except Exception as e:
-        print(f"An error occurred while fetching doctor name: {e}")
-        return None
-
-def get_patient_appointments_by_id(patient_id):
-    """
-    Searches for all appointments for a specific patient using their ID.
-    """
-    # [This function remains unchanged]
-    if not db:
-        initialize_firebase()
-        
-    appointments_ref = db.collection('appointment_data')
-    query = appointments_ref.where('patientId', '==', patient_id)
-    
-    try:
-        docs = query.stream()
-        results = []
-        for doc in docs:
-            doc_data = doc.to_dict()
-            doc_data['doc_id'] = doc.id
-            results.append(doc_data)
-        return results
-    except Exception as e:
-        print(f"An error occurred while searching appointments: {e}")
-        return []
