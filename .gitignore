@@ -1,0 +1,12 @@
+# Environment variables
+.env
+
+# Google Cloud / Firebase credentials
+serviceAccountKey.json
+google_credentials.json
+
+# Python specific files
+__pycache__/
+*.pyc
+venv/
+env/
